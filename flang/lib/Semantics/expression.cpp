@@ -16,6 +16,7 @@
 #include "flang/Evaluate/common.h"
 #include "flang/Evaluate/fold.h"
 #include "flang/Evaluate/tools.h"
+#include "flang/Evaluate/traverse.h"
 #include "flang/Parser/characters.h"
 #include "flang/Parser/dump-parse-tree.h"
 #include "flang/Parser/parse-tree-visitor.h"
@@ -61,6 +62,29 @@ std::optional<Expr<SubscriptInteger>> DynamicTypeWithLength::LEN() const {
   } else {
     return GetCharLength();
   }
+}
+
+// Check if an expression contains a reference to a specific implied DO index
+// variable, identified by its name.
+class ContainsImpliedDoIndexHelper
+    : public AnyTraverse<ContainsImpliedDoIndexHelper> {
+public:
+  using Base = AnyTraverse<ContainsImpliedDoIndexHelper>;
+  using Base::operator();
+  explicit ContainsImpliedDoIndexHelper(parser::CharBlock name)
+      : Base{*this}, name_{name} {}
+  bool operator()(const ImpliedDoIndex &ido) const {
+    return ido.name == name_;
+  }
+
+private:
+  parser::CharBlock name_;
+};
+
+template <typename A>
+static bool ContainsImpliedDoIndex(
+    const A &expr, parser::CharBlock name) {
+  return ContainsImpliedDoIndexHelper{name}(expr);
 }
 
 static std::optional<DynamicTypeWithLength> AnalyzeTypeSpec(
@@ -2031,10 +2055,15 @@ void ArrayConstructorContext::Add(const parser::AcImpliedDo &impliedDo) {
         }
       }
       // F'2023 7.8 p5
-      if (!(messageDisplayedSet_ & 0x100) && isEmpty && NeedLength()) {
-        exprAnalyzer_.SayAt(name,
-            "Array constructor implied DO loop has no iterations and indeterminate character length"_err_en_US);
-        messageDisplayedSet_ |= 0x100;
+      if (!(messageDisplayedSet_ & 0x100) && isEmpty &&
+          type_ && type_->category() == TypeCategory::Character &&
+          !explicitType_) {
+        auto len{type_->LEN()};
+        if (!len || ContainsImpliedDoIndex(*len, name)) {
+          exprAnalyzer_.SayAt(name,
+              "Array constructor implied DO loop has no iterations and indeterminate character length"_err_en_US);
+          messageDisplayedSet_ |= 0x100;
+        }
       }
       if (unrollConstantLoop) {
         messageDisplayedSet_ = saveMessagesDisplayed;
