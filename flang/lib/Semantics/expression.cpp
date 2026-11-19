@@ -1832,13 +1832,26 @@ private:
   static constexpr int ImpliedDoIntKind = ResultKind<ImpliedDoIndex>;
 
   std::optional<Expr<SubscriptInteger>> LengthIfGood() const {
-    if (type_) {
-      auto len{type_->LEN()};
-      if (explicitType_ ||
-          (len &&
-              IsConstantExpr(
-                  *len, &exprAnalyzer_.context().foldingContext()))) {
-        return len;
+    if (!type_) {
+      return std::nullopt;
+    }
+    auto len{type_->LEN()};
+    if (explicitType_) {
+      return len;
+    }
+    if (!len) {
+      return std::nullopt;
+    }
+    if (IsConstantExpr(*len, &exprAnalyzer_.context().foldingContext())) {
+      return len;
+    }
+    // F'2023 7.8 p5: a deferred or assumed length is a type parameter, not
+    // the value of an expression.  It must be common to all of the ac-values.
+    if (!distinctNonConstantLengths_ && !ContainsAnyImpliedDoIndex(*len)) {
+      if (const auto *inquiry{UnwrapExpr<DescriptorInquiry>(*len)}) {
+        if (inquiry->field() == DescriptorInquiry::Field::Len) {
+          return len;
+        }
       }
     }
     return std::nullopt;
@@ -1878,6 +1891,7 @@ private:
   std::optional<DynamicTypeWithLength> type_;
   bool explicitType_{type_.has_value()};
   std::optional<std::int64_t> constantLength_;
+  bool distinctNonConstantLengths_{false};
   ArrayConstructorValues<SomeType> values_;
   std::uint64_t messageDisplayedSet_{0};
 };
@@ -1983,8 +1997,13 @@ void ArrayConstructorContext::Push(MaybeExpr &&x) {
           constantLength_ = *thisLen;
           type_->length = std::move(xLen);
         }
-      } else if (xLen && NeedLength()) {
-        type_->length = std::move(xLen);
+      } else if (xLen) {
+        if (!type_->length || !(*xLen == *type_->length)) {
+          distinctNonConstantLengths_ = true;
+        }
+        if (NeedLength()) {
+          type_->length = std::move(xLen);
+        }
       }
     } else {
       if (!(messageDisplayedSet_ & 2)) {
